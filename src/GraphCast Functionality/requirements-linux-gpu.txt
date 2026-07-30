@@ -1,0 +1,36 @@
+# Dependency manifest for running the GraphCast pipeline on the Linux/RTX 3090 box.
+# Do NOT install this on the Windows dev machine: JAX's CUDA pip wheels only work
+# on Linux x86_64/aarch64 and silently fail on Windows (see docs.jax.dev/installation).
+#
+# Target: Ubuntu (22.04/24.04), NVIDIA driver >= 550, RTX 3090 (Ampere, SM 8.6 -
+# well within JAX's supported SM >= 5.2 floor for both CUDA 12 and CUDA 13 builds).
+
+# JAX with GPU support - pip-bundled CUDA/cuDNN, no system CUDA Toolkit install needed.
+# CUDA 13 is JAX's current default; CUDA 12 is being phased out but kept below as a
+# fallback if the installed driver is too old for CUDA 13.
+jax[cuda13]
+# jax[cuda12]  # fallback: use this instead if `nvidia-smi` driver version is too old for cuda13
+
+# GraphCast / WeatherNext (Google DeepMind) - includes GraphCast_operational (pretrained,
+# 0.25deg, 13 pressure levels). No dedicated PyPI package; installed from source, which
+# also pulls in dm-haiku, chex, dm-tree, jraph, jaxline, dinosaur-dycore, trimesh, rtree,
+# cartopy as transitive deps via its setup.py.
+git+https://github.com/google-deepmind/weathernext.git
+
+# Access to the public GCS bucket hosting pretrained weights and the example init batches
+# (build_GraphCast.py and prediciton_build_test.py use google.cloud.storage directly, matching
+# the official demo notebook, not gcsfs).
+google-cloud-storage
+
+# Live-data source for prediction_build.py - free, no-license ECMWF HRES Open Data feed,
+# and the GRIB2 reader xarray needs to open it. cfgrib also needs the eccodes C library;
+# the eccodes pip wheel usually covers this on Linux, but if `engine="cfgrib"` fails to load,
+# install the system package (e.g. `apt-get install libeccodes0`) as a fallback.
+ecmwf-opendata
+cfgrib
+
+# Core data handling - versions matched to the rest of this repo's requirements.txt.
+numpy==2.4.6
+pandas==3.0.5
+xarray==2026.7.0
+netCDF4==1.7.4
