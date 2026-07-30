@@ -13,11 +13,11 @@ import pyvista as pv
 from geo_projection import latlon_to_local_xy
 
 STL_DIR = os.path.join("Data", "stl_data", "Oxford Course")
-OUT_DIR = os.path.join("out", "stl_trimmed")
+OUT_DIR = os.path.join("Data", "stl_data", "Oxford Course", "stl_trimmed")
 
 # Center point (lat, lon degrees) and radius (meters).
-CENTER_LATLON = (51.78, -1.20)
-RADIUS_M = 1000.0
+CENTER_LATLON = (51.792827, -1.222481)
+RADIUS_M = 2120
 
 
 def load_stl_files(stl_dir):
