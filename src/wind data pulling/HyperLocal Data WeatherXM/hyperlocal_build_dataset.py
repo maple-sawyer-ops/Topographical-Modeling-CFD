@@ -9,6 +9,7 @@ metres/7-day API gotchas, rate-limit behaviour, and full code structure.
 # Standard-library imports only, besides `requests` (the one allowed
 # third-party dependency).
 import json
+import logging
 import time
 from pathlib import Path
 
@@ -17,10 +18,18 @@ from pathlib import Path
 import requests
 
 # Config: the hardcoded Location instance plus account-level run settings.
-from hyperlocal_input_loc import OXFORD, API_KEY, MIN_QOD, CACHE_DIR, OUTPUT_DIR
+from hyperlocal_input_loc import OXFORD, API_KEY, MIN_QOD, CACHE_DIR, OUTPUT_DIR, LOG_DIR
 
 # Station discovery function from File 2.
 from hyperlocal_find_stations import discover_stations, BASE_URL
+
+# Attaches file/console handlers to the ROOT logger; every module's
+# `logging.getLogger(__name__)` logger propagates up to them.
+from hyperlocal_logging import setup_logging
+
+# Logger named "hyperlocal_build_dataset" -- see hyperlocal_find_stations.py
+# for the full explanation of this pattern.
+logger = logging.getLogger(__name__)
 
 
 # Small pause between consecutive history calls so we don't hammer the API
@@ -92,10 +101,7 @@ def _fetch_history(station_id, start, end, api_key, cache_dir, stats):
             # malformed JSON in the cache file. Either way we fall through
             # and re-fetch from the API rather than crashing on a corrupt
             # cache entry.
-            print(
-                "[_fetch_history] Cache file %s unreadable (%s); re-fetching from API."
-                % (cache_file, exc)
-            )
+            logger.warning("Cache file %s unreadable (%s); re-fetching from API.", cache_file, exc)
 
     # --- Not cached (or cache was unreadable): call the API ---
     url = BASE_URL + "/stations/" + station_id + "/history"
@@ -109,9 +115,8 @@ def _fetch_history(station_id, start, end, api_key, cache_dir, stats):
         # Covers connection errors, timeouts, and HTTP error statuses
         # (including 429 rate-limit responses) -- all logged and treated as
         # "this one call failed", not a fatal error for the whole run.
-        print(
-            "[_fetch_history] FAILED history call for station=%s range=%s..%s: %s"
-            % (station_id, start, end, exc)
+        logger.error(
+            "FAILED history call for station=%s range=%s..%s: %s", station_id, start, end, exc
         )
         stats["failures"] += 1
         stats["api_calls"] += 1
@@ -122,9 +127,8 @@ def _fetch_history(station_id, start, end, api_key, cache_dir, stats):
     try:
         payload = response.json()
     except ValueError as exc:
-        print(
-            "[_fetch_history] FAILED to parse JSON for station=%s range=%s..%s: %s"
-            % (station_id, start, end, exc)
+        logger.error(
+            "FAILED to parse JSON for station=%s range=%s..%s: %s", station_id, start, end, exc
         )
         stats["failures"] += 1
         return None
@@ -142,10 +146,7 @@ def _fetch_history(station_id, start, end, api_key, cache_dir, stats):
     except OSError as exc:
         # Failing to WRITE the cache shouldn't discard data we already
         # successfully fetched -- log it and continue using `payload` as-is.
-        print(
-            "[_fetch_history] WARNING: could not write cache file %s: %s"
-            % (cache_file, exc)
-        )
+        logger.warning("Could not write cache file %s: %s", cache_file, exc)
 
     # Courtesy delay before the NEXT call this function's caller makes.
     time.sleep(SLEEP_BETWEEN_CALLS_SECONDS)
@@ -169,21 +170,21 @@ def build_dataset_for_location(location, api_key, min_qod, cache_dir, output_dir
     # passed into `_fetch_history` so it can increment counters in place.
     stats = {"api_calls": 0, "cache_hits": 0, "failures": 0}
 
-    print("=" * 70)
-    print("Building dataset for %r" % location)
-    print("=" * 70)
+    logger.info("=" * 70)
+    logger.info("Building dataset for %r", location)
+    logger.info("=" * 70)
 
     # --- Step 1: discover stations near this location ---
     stations = discover_stations(location, api_key, min_qod)
-    print("[build_dataset] %d station(s) available for %s." % (len(stations), location.name))
+    logger.info("%d station(s) available for %s.", len(stations), location.name)
 
     # --- Step 2: get the <=7-day date chunks for this location's range ---
     # We do NOT compute chunking logic here -- `location.date_chunks()` owns
     # that, per the class's encapsulation of the 7-day API gotcha.
     chunks = location.date_chunks()
-    print(
-        "[build_dataset] Date range %s..%s split into %d chunk(s) of <=7 days."
-        % (location.start_date, location.end_date, len(chunks))
+    logger.info(
+        "Query date %s -> window %s..%s (%d chunk(s)).",
+        location.query_date, chunks[0][0], chunks[0][1], len(chunks),
     )
 
     all_records = []
@@ -233,17 +234,22 @@ def build_dataset_for_location(location, api_key, min_qod, cache_dir, output_dir
             # this station-day's response.
             for obs in observations:
                 # Build one flat output record per observation, keeping only
-                # the wind-focused fields the spec asks for (plus the two
+                # the fields this project cares about -- temperature,
+                # pressure, and the three wind fields -- plus the two
                 # quality scores, carried alongside each record so
                 # downstream consumers can re-filter/weight without
-                # re-fetching).
+                # re-fetching. Everything else the API returns (dew_point,
+                # humidity, uv_index, solar_irradiance, feels_like,
+                # precipitation_*) is dropped here.
                 all_records.append(
                     {
                         "station_id": station_id,
                         "timestamp": obs.get("timestamp"),
+                        "temperature": obs.get("temperature"),
                         "wind_speed": obs.get("wind_speed"),
                         "wind_gust": obs.get("wind_gust"),
                         "wind_direction": obs.get("wind_direction"),
+                        "pressure": obs.get("pressure"),
                         "data_quality_score": data_quality_score,
                         "location_quality_score": location_quality_score,
                     }
@@ -264,20 +270,20 @@ def build_dataset_for_location(location, api_key, min_qod, cache_dir, output_dir
     # indentation, trading a larger file size for human readability.
     output_file.write_text(json.dumps(all_records_sorted, indent=2), encoding="utf-8")
 
-    # --- Step 5: print the run summary ---
-    print("-" * 70)
-    print("RUN SUMMARY for %s" % location.name)
-    print("-" * 70)
-    print("Stations discovered:              %d" % len(stations))
-    print("Stations with usable history:     %d" % len(stations_with_data))
-    print("Date chunks processed:            %d" % len(chunks))
-    print("Observations kept:                %d" % len(all_records_sorted))
-    print("Observations dropped (quality):   %d" % observations_dropped_quality)
-    print("API calls made:                   %d" % stats["api_calls"])
-    print("Served from cache:                %d" % stats["cache_hits"])
-    print("Failed calls:                     %d" % stats["failures"])
-    print("Output written to:                %s" % output_file)
-    print("-" * 70)
+    # --- Step 5: log the run summary ---
+    logger.info("-" * 70)
+    logger.info("RUN SUMMARY for %s", location.name)
+    logger.info("-" * 70)
+    logger.info("Stations discovered:              %d", len(stations))
+    logger.info("Stations with usable history:     %d", len(stations_with_data))
+    logger.info("Date chunks processed:            %d", len(chunks))
+    logger.info("Observations kept:                %d", len(all_records_sorted))
+    logger.info("Observations dropped (quality):   %d", observations_dropped_quality)
+    logger.info("API calls made:                   %d", stats["api_calls"])
+    logger.info("Served from cache:                %d", stats["cache_hits"])
+    logger.info("Failed calls:                     %d", stats["failures"])
+    logger.info("Output written to:                %s", output_file)
+    logger.info("-" * 70)
 
     return all_records_sorted
 
@@ -288,6 +294,11 @@ def build_dataset_for_location(location, api_key, min_qod, cache_dir, output_dir
 # variable Python sets to "__main__" for the script that was launched, and to
 # the module's own name when it's imported instead.
 if __name__ == "__main__":
+    # Configure logging FIRST, before anything else logs -- this attaches
+    # the file+console handlers to the root logger that every module's
+    # logger propagates up to.
+    setup_logging(LOG_DIR)
+
     # This is the ONE place in the whole project that decides "run for
     # OXFORD" -- build_dataset_for_location itself takes location as an
     # argument, so pointing this at a different place later means adding a

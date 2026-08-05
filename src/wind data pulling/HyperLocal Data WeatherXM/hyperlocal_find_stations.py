@@ -19,8 +19,18 @@ import requests
 
 # `datetime` is used to parse the "createdAt" ISO8601 timestamp WeatherXM
 # returns for each station, so it can be compared against the Location's
-# start_date.
+# start_date. `logging` replaces print() for all status/error output.
 from datetime import datetime
+import logging
+
+
+# `logging.getLogger(__name__)` returns a logger named "hyperlocal_find_stations"
+# (module-level __name__), a CHILD of the root logger. This module never
+# configures handlers itself -- `hyperlocal_logging.setup_logging()`, called
+# once by whichever script is run directly, attaches the file/console
+# handlers to the root logger, and this logger's messages propagate up to
+# them automatically.
+logger = logging.getLogger(__name__)
 
 
 # Base URL for the WeatherXM Pro API. Kept as a module constant so it's
@@ -112,10 +122,7 @@ def discover_stations(location, api_key, min_qod):
         # etc.), so catching it here covers all failure modes for this one
         # call. We log and return an empty list rather than propagating,
         # per the "fail gracefully" requirement.
-        print(
-            "[discover_stations] FAILED to fetch stations near %s: %s"
-            % (location.name, exc)
-        )
+        logger.error("FAILED to fetch stations near %s: %s", location.name, exc)
         return []
 
     # `.json()` parses the response body as JSON into Python objects (dicts/
@@ -124,10 +131,7 @@ def discover_stations(location, api_key, min_qod):
     try:
         payload = response.json()
     except ValueError as exc:
-        print(
-            "[discover_stations] FAILED to parse JSON for stations near %s: %s"
-            % (location.name, exc)
-        )
+        logger.error("FAILED to parse JSON for stations near %s: %s", location.name, exc)
         return []
 
     # --- Handle both possible response shapes ---
@@ -145,9 +149,8 @@ def discover_stations(location, api_key, min_qod):
         # a defensive default for an unexpected object shape.
         raw_stations = payload.get("stations", [])
     else:
-        print(
-            "[discover_stations] Unexpected response shape for stations near %s: %r"
-            % (location.name, type(payload))
+        logger.error(
+            "Unexpected response shape for stations near %s: %r", location.name, type(payload)
         )
         raw_stations = []
 
@@ -173,10 +176,7 @@ def discover_stations(location, api_key, min_qod):
             # `KeyError` if an expected key is missing; `TypeError` if e.g.
             # `station["location"]` isn't a dict at all. Either way, log and
             # skip just this one record.
-            print(
-                "[discover_stations] Skipping malformed station record %r: %s"
-                % (station, exc)
-            )
+            logger.warning("Skipping malformed station record %r: %s", station, exc)
             dropped_bad_data += 1
             continue
 
@@ -188,19 +188,19 @@ def discover_stations(location, api_key, min_qod):
         try:
             created_date = _parse_created_at(created_at_str)
         except ValueError as exc:
-            print(
-                "[discover_stations] Skipping station %s (%s): unparseable createdAt %r: %s"
-                % (station_id, name, created_at_str, exc)
+            logger.warning(
+                "Skipping station %s (%s): unparseable createdAt %r: %s",
+                station_id, name, created_at_str, exc,
             )
             dropped_bad_data += 1
             continue
 
-        # Compare against location.start_date (the public "YYYY-MM-DD" string
-        # attribute) rather than reaching into Location's private parsed-date
-        # attribute -- we re-parse it here to respect the class's
-        # encapsulation. `datetime.strptime(text, fmt).date()` mirrors the
-        # parsing Location itself does internally.
-        location_start_date = datetime.strptime(location.start_date, "%Y-%m-%d").date()
+        # `location.date_chunks()` returns [(start_str, end_str)] -- a single
+        # 7-day window derived from location.query_date; `[0][0]` reaches
+        # into that one tuple to pull out the window's start string, which we
+        # then parse to a `date` for comparison against `created_date`.
+        window_start_str = location.date_chunks()[0][0]
+        location_start_date = datetime.strptime(window_start_str, "%Y-%m-%d").date()
         if created_date > location_start_date:
             dropped_no_coverage += 1
             continue
@@ -228,16 +228,10 @@ def discover_stations(location, api_key, min_qod):
         )
 
     # --- Log a summary of what was dropped and why ---
-    print(
-        "[discover_stations] %s: found %d station(s) near location; "
-        "kept %d, dropped %d (no coverage before start_date), dropped %d (bad/low-quality data)."
-        % (
-            location.name,
-            len(raw_stations),
-            len(kept_stations),
-            dropped_no_coverage,
-            dropped_bad_data,
-        )
+    logger.info(
+        "%s: found %d station(s) near location; "
+        "kept %d, dropped %d (no coverage before start_date), dropped %d (bad/low-quality data).",
+        location.name, len(raw_stations), len(kept_stations), dropped_no_coverage, dropped_bad_data,
     )
 
     return kept_stations

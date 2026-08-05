@@ -8,8 +8,8 @@ and per-observation data-quality filtering.
 
 1. **hyperlocal_input_loc.py** -- defines the `Location` class and the
    hardcoded `OXFORD` instance, plus account-level constants (`API_KEY`,
-   `MIN_QOD`, `CACHE_DIR`, `OUTPUT_DIR`). Edit this file to change the
-   target place/date-range, or to add another `Location` for a different
+   `MIN_QOD`, `CACHE_DIR`, `OUTPUT_DIR`, `LOG_DIR`). Edit this file to change
+   the target place/date, or to add another `Location` for a different
    place.
 2. **hyperlocal_find_stations.py** -- `discover_stations(location, api_key,
    min_qod)` finds nearby WeatherXM Pro stations and filters out ones with
@@ -18,24 +18,25 @@ and per-observation data-quality filtering.
    station `discover_stations` returns, assembles it into one flat JSON
    dataset. Run this file directly (`python hyperlocal_build_dataset.py`)
    to execute the full pipeline for `OXFORD`.
+4. **hyperlocal_logging.py** -- `setup_logging(log_dir)`, called once by
+   whichever script is run directly, before the pipeline logic starts.
 
 ## Gotchas handled by the `Location` class
 
 ### Gotcha #1 -- radius is in METRES, not km
 
 The WeatherXM `/stations/near` endpoint's `radius` query parameter is in
-METRES. This project stores radius as `radius_km` for human readability, but
-every call site uses `Location.radius_m` (a property) or
-`Location.to_near_params()` (which uses that property internally), so the
-conversion happens in exactly one place and callers never do it by hand.
+METRES. `Location.__init__` takes `radius_km` (human-readable) and computes
+`self.radius_m = radius_km * 1000` once, so every call site (via
+`Location.to_near_params()`) uses metres without converting by hand.
 
 ### Gotcha #2 -- history ranges are capped at 7 days
 
 The WeatherXM `/stations/{id}/history` endpoint REJECTS date ranges longer
-than 7 days. This project never asks for the whole `START_DATE..END_DATE`
-range in one call; instead `Location.date_chunks()` splits it into
-consecutive <=7-day `(start, end)` string pairs, and `hyperlocal_build_dataset.py`
-makes one API call per station PER CHUNK.
+than 7 days. `Location` takes a single `query_date` (the window's END) and
+`Location.date_chunks()` derives the 7-day window (`query_date - 6 days` ..
+`query_date`) on demand, returning `[(start, end)]` for
+`hyperlocal_build_dataset.py` to call `/history` with.
 
 ## Rate limits / costs
 
@@ -52,26 +53,40 @@ already-successful ones are served from cache.
 ### `hyperlocal_input_loc.py` (config, object-oriented)
 
 - `Location` -- encapsulates geography, timeframe, and both API gotchas:
-  - `__init__(lat, lon, radius_km, start_date, end_date, name)` -- validates
-    lat/lon ranges, `radius_km > 0`, and `start_date <= end_date`; raises
-    `ValueError` on any violation.
-  - `radius_m` (property) -- `radius_km * 1000`.
-  - `date_chunks()` -- splits the date range into <=7-day `(start, end)`
-    string-pair chunks.
+  - `__init__(lat, lon, radius_km, query_date, name)` -- validates lat/lon
+    ranges, `radius_km > 0`, and `query_date` is a valid `"YYYY-MM-DD"`
+    string; raises `ValueError` on any violation. Stores `radius_m`
+    (`radius_km * 1000`) directly as a plain attribute.
+  - `date_chunks()` -- computes the 7-day window (`query_date - 6 days` ..
+    `query_date`) on demand and returns it as `[(start, end)]`; start/end
+    aren't stored as attributes since they're only needed by callers making
+    the actual API query.
   - `to_near_params()` -- builds the `/stations/near` query-param dict
     (`lat`, `lon`, `radius` in metres).
 - `OXFORD` -- the single hardcoded `Location` instance for this project.
   Add more `Location(...)` instances here to generalise to other places;
   Files 2 and 3 require no changes.
 - Module-level constants (account/run settings, not per-location): `API_KEY`,
-  `MIN_QOD`, `CACHE_DIR`, `OUTPUT_DIR`.
+  `MIN_QOD`, `CACHE_DIR`, `OUTPUT_DIR`, `LOG_DIR`.
+- `smoke_test(location, api_key)` -- low-call-count sanity check (see
+  Smoke test section below).
+
+### `hyperlocal_logging.py` (logging setup)
+
+- `setup_logging(log_dir)` -- attaches a `FileHandler` (writes to a new
+  `log_dir/{timestamp}.log` file each run) and a `StreamHandler` (writes to
+  the console) to the ROOT logger. Every other module gets its logger via
+  `logging.getLogger(__name__)` and never configures handlers itself --
+  those child-logger messages propagate up to whatever `setup_logging()`
+  attached to the root, so this is called exactly once, near the top of
+  whichever script's `__main__` block is run.
 
 ### `hyperlocal_find_stations.py` (discovery)
 
 - `discover_stations(location, api_key, min_qod)` -- calls `/stations/near`
   with `location.to_near_params()`, handles both possible response shapes
   (bare list or `{"stations": [...]}`), hard-gates out stations whose
-  `createdAt` is after `location.start_date`, optionally applies a
+  `createdAt` is after the window start from `location.date_chunks()[0][0]`, optionally applies a
   per-station quality filter if the field is present, and returns
   `[{"id", "name", "lat", "lon", "createdAt"}, ...]`.
 
@@ -92,6 +107,8 @@ already-successful ones are served from cache.
 ## Output
 
 A single JSON file at `OUTPUT_DIR/{location_name}_wind_dataset.json`: a flat
-list of records, each with `station_id`, `timestamp`, `wind_speed`,
-`wind_gust`, `wind_direction`, `data_quality_score`, `location_quality_score`,
-sorted by `station_id` then `timestamp`.
+list of records, each with `station_id`, `timestamp`, `temperature`,
+`wind_speed`, `wind_gust`, `wind_direction`, `pressure`,
+`data_quality_score`, `location_quality_score`, sorted by `station_id` then
+`timestamp`. All other fields the API returns (dew_point, humidity,
+uv_index, solar_irradiance, feels_like, precipitation_*) are dropped.

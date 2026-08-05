@@ -1,0 +1,5 @@
+2026-08-05 16:14:32 [INFO] __main__: ======================================================================
+2026-08-05 16:14:32 [INFO] __main__: SMOKE TEST for Location(name='Oxford', lat=51.792827, lon=-1.222481, radius_mi=2.0, query_date='2026-08-04')
+2026-08-05 16:14:32 [INFO] __main__: ======================================================================
+2026-08-05 16:14:33 [INFO] __main__: 0 station(s) returned near Oxford.
+2026-08-05 16:14:33 [ERROR] __main__: FAILED: no stations in response. SUMMARY={'NUMBER_OF_OBJECTS': 0, 'RESPONSE_CODE': 2, 'RESPONSE_MESSAGE': 'No stations found for this request, or your account does not have access to the requested station(s). Please contact support@synopticdata.com.', 'RESPONSE_TIME': 0, 'VERSION': 'v2.36.2'}
